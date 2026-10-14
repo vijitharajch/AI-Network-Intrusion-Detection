@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+venv311/
+env/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Machine learning artifacts and generated models
+*.joblib
+*.pkl
+*.pickle
+
+# Datasets and captured network traffic
+data/
+*.pcap
+*.pcapng
+*.cap
+
+# Frontend
+node_modules/
+dist/
+build/
+
+# Logs and temporary files
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Keep source code, documentation, and dependency manifests tracked
