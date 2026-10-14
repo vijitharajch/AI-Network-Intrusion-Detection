@@ -1,11 +1,11 @@
 
 from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-import pandas as pd
-
-from pathlib import Path
 
 from .config import CORS_ORIGINS
 from .db import init_db, get_db, Alert
@@ -26,61 +26,166 @@ app.add_middleware(
 
 init_db()
 service = ModelService()
-# --------------------------------------------------
-# Live traffic flow statistics (not AI predictions)
-# --------------------------------------------------
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-LIVE_FLOWS_CSV = PROJECT_ROOT / "data" / "live_flows" / "scapy_live_flows.csv"
+LIVE_FLOWS_CSV = (
+    PROJECT_ROOT / "data" / "live_flows" / "scapy_live_flows.csv"
+)
 
 
+# ---------------------------------------------------------
+# LIVE NETWORK TRAFFIC
+# Uses captured CSV data when available.
+# Otherwise, returns clearly labeled presentation simulation.
+# ---------------------------------------------------------
 @app.get("/api/live-flows")
 def get_live_flows():
-    if not LIVE_FLOWS_CSV.exists():
-        return {"total": 0, "flows": [], "message": "No live-flow CSV found"}
+    if LIVE_FLOWS_CSV.exists():
+        try:
+            df = pd.read_csv(LIVE_FLOWS_CSV)
 
-    try:
-        df = pd.read_csv(LIVE_FLOWS_CSV)
-        df = df.where(pd.notnull(df), None)
-        return {
-            "total": len(df),
-            "tcp": int((df["protocol"] == "TCP").sum()),
-            "udp": int((df["protocol"] == "UDP").sum()),
-            "total_packets": int(df["packets"].sum()),
-            "total_bytes": int(df["bytes"].sum()),
-            "flows": df.to_dict(orient="records"),
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Could not read live-flow CSV: {e}"
-        )
+            required_columns = {
+                "protocol",
+                "packets",
+                "bytes",
+                "src_ip",
+                "src_port",
+                "dst_ip",
+                "dst_port",
+                "duration_seconds",
+            }
 
-# --------------------------------------------------
-# Health check
-# --------------------------------------------------
+            missing = required_columns - set(df.columns)
+
+            if missing:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        "Live-flow CSV is missing columns: "
+                        + ", ".join(sorted(missing))
+                    ),
+                )
+
+            df = df.where(pd.notnull(df), None)
+
+            return {
+                "mode": "CAPTURED DATA",
+                "total": len(df),
+                "tcp": int((df["protocol"] == "TCP").sum()),
+                "udp": int((df["protocol"] == "UDP").sum()),
+                "total_packets": int(df["packets"].sum()),
+                "total_bytes": int(df["bytes"].sum()),
+                "flows": df.to_dict(orient="records"),
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Could not read live-flow CSV: {e}",
+            )
+
+    # Presentation-only traffic simulation.
+    # These records are NOT captured packets or AI predictions.
+    now = datetime.utcnow()
+
+    flows = [
+        {
+            "src_ip": "192.168.1.10",
+            "src_port": 51001,
+            "dst_ip": "142.250.183.14",
+            "dst_port": 443,
+            "protocol": "TCP",
+            "packets": 42 + now.second % 20,
+            "bytes": 5200 + now.second * 37,
+            "duration_seconds": round(
+                1.2 + (now.second % 8) * 0.3, 2
+            ),
+        },
+        {
+            "src_ip": "192.168.1.12",
+            "src_port": 53002,
+            "dst_ip": "8.8.8.8",
+            "dst_port": 53,
+            "protocol": "UDP",
+            "packets": 8 + now.second % 7,
+            "bytes": 640 + now.second * 11,
+            "duration_seconds": round(
+                0.2 + (now.second % 5) * 0.1, 2
+            ),
+        },
+        {
+            "src_ip": "192.168.1.15",
+            "src_port": 54003,
+            "dst_ip": "203.0.113.25",
+            "dst_port": 22,
+            "protocol": "TCP",
+            "packets": 65 + now.second % 25,
+            "bytes": 7800 + now.second * 53,
+            "duration_seconds": round(
+                2.0 + (now.second % 6) * 0.4, 2
+            ),
+        },
+        {
+            "src_ip": "192.168.1.20",
+            "src_port": 55004,
+            "dst_ip": "198.51.100.40",
+            "dst_port": 80,
+            "protocol": "TCP",
+            "packets": 18 + now.second % 12,
+            "bytes": 1900 + now.second * 19,
+            "duration_seconds": round(
+                0.8 + (now.second % 4) * 0.2, 2
+            ),
+        },
+    ]
+
+    return {
+        "mode": "SIMULATED DEMO",
+        "message": (
+            "Presentation simulation only. These are generated "
+            "sample flows, not captured network traffic or AI predictions."
+        ),
+        "total": len(flows),
+        "tcp": sum(f["protocol"] == "TCP" for f in flows),
+        "udp": sum(f["protocol"] == "UDP" for f in flows),
+        "total_packets": sum(f["packets"] for f in flows),
+        "total_bytes": sum(f["bytes"] for f in flows),
+        "flows": flows,
+    }
+
+
+# ---------------------------------------------------------
+# HEALTH CHECK
+# ---------------------------------------------------------
 @app.get("/health")
 def health():
     return {
         "status": "ok",
-        "models_ready": service.ready
+        "models_ready": service.ready,
     }
 
 
-# --------------------------------------------------
-# Single network-flow prediction
-# --------------------------------------------------
+# ---------------------------------------------------------
+# SINGLE-FLOW AI PREDICTION
+# ---------------------------------------------------------
 @app.post("/api/predict", response_model=PredictionResponse)
 def predict(
     req: PredictionRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     try:
-        prediction, confidence, anomaly = service.predict(req.features)
+        prediction, confidence, anomaly = service.predict(
+            req.features
+        )
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
     risk = risk_level(prediction, confidence, anomaly)
-    explanation = explain(prediction, confidence, anomaly, risk)
+    explanation = explain(
+        prediction, confidence, anomaly, risk
+    )
 
     source_ip = req.source_ip or "unknown"
     destination_ip = req.destination_ip or "unknown"
@@ -94,7 +199,7 @@ def predict(
             risk=risk,
             source_ip=source_ip,
             destination_ip=destination_ip,
-            details="; ".join(explanation)
+            details="; ".join(explanation),
         )
         db.add(alert)
         db.commit()
@@ -106,127 +211,119 @@ def predict(
         risk=risk,
         source_ip=source_ip,
         destination_ip=destination_ip,
-        explanation=explanation
+        explanation=explanation,
     )
 
 
-# --------------------------------------------------
-# CSV batch prediction using bounded chunks
-# --------------------------------------------------
-
+# ---------------------------------------------------------
+# CSV BATCH PREDICTION
+# ---------------------------------------------------------
 @app.post("/api/predict/csv")
 def predict_csv(
     file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     if not file.filename or not file.filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Upload a CSV file")
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a CSV file.",
+        )
+
+    try:
+        df = pd.read_csv(file.file)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not read CSV file: {e}",
+        )
+
+    if df.empty:
+        raise HTTPException(
+            status_code=400,
+            detail="The uploaded CSV is empty.",
+        )
 
     if not service.ready:
-        raise HTTPException(status_code=503, detail="Classifier is not trained")
+        raise HTTPException(
+            status_code=503,
+            detail="AI models are not ready.",
+        )
 
-    if not service.anomaly_ready:
-        raise HTTPException(status_code=503, detail="Anomaly detector is not trained")
-
-    chunk_size = 5000
+    # Bound memory and response size for large uploads.
+    total_rows = len(df)
     max_returned_rows = 5000
     max_saved_alerts = 500
 
-    total = 0
-    suspicious = 0
-    saved_alerts = 0
-    results = []
-
     try:
-        chunks = pd.read_csv(
-            file.file,
-            chunksize=chunk_size,
-            encoding_errors="replace"
+        predictions = service.predict_batch(df)
+    except (RuntimeError, ValueError) as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"CSV prediction failed: {e}",
         )
 
-        for df in chunks:
-            if df.empty:
-                continue
+    rows = []
+    alerts_saved = 0
+    suspicious = 0
 
-            df.columns = df.columns.str.strip()
+    for index, item in enumerate(predictions):
+        if isinstance(item, dict):
+            prediction = item.get("prediction", "UNKNOWN")
+            confidence = float(item.get("confidence", 0.0))
+            anomaly = bool(item.get("anomaly", False))
+        else:
+            prediction, confidence, anomaly = item
+            confidence = float(confidence)
+            anomaly = bool(anomaly)
 
-            # Run Random Forest and Isolation Forest together.
-            batch_results = service.predict_batch(df)
-            chunk_alerts = []
+        risk = risk_level(prediction, confidence, anomaly)
 
-            for i, item in enumerate(batch_results):
-                prediction = item["prediction"]
-                confidence = item["confidence"]
-                anomaly = item["anomaly"]
-
-                risk = risk_level(prediction, confidence, anomaly)
-                total += 1
-
-                if risk != "LOW":
-                    suspicious += 1
-
-                    if saved_alerts < max_saved_alerts:
-                        chunk_alerts.append(
-                            Alert(
-                                timestamp=datetime.utcnow(),
-                                prediction=prediction,
-                                confidence=confidence,
-                                anomaly=int(anomaly),
-                                risk=risk,
-                                source_ip=str(
-                                    df.iloc[i].get("Source IP", "unknown")
-                                ),
-                                destination_ip=str(
-                                    df.iloc[i].get("Destination IP", "unknown")
-                                ),
-                                details=(
-                                    f"Random Forest: {prediction}; "
-                                    f"Isolation Forest anomaly: {anomaly}"
-                                )
-                            )
-                        )
-                        saved_alerts += 1
-
-                if len(results) < max_returned_rows:
-                    results.append({
-                        "prediction": prediction,
-                        "confidence": round(confidence, 4),
-                        "anomaly": anomaly,
-                        "risk": risk
-                    })
-
-            if chunk_alerts:
-                db.add_all(chunk_alerts)
-                db.commit()
-
-        if total == 0:
-            raise HTTPException(status_code=400, detail="CSV file is empty")
-
-        return {
-            "total": total,
-            "suspicious": suspicious,
-            "alerts_saved": saved_alerts,
-            "rows_returned": len(results),
-            "rows": results
+        row = {
+            "prediction": prediction,
+            "confidence": confidence,
+            "anomaly": anomaly,
+            "risk": risk,
         }
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(
-            status_code=500,
-            detail=f"CSV processing failed: {str(e)}"
-        )
-    finally:
-        file.file.close()
-#----------------------------------
-# Recent security alerts
-# --------------------------------------------------
+        if index < max_returned_rows:
+            rows.append(row)
+
+        if risk != "LOW":
+            suspicious += 1
+
+            if alerts_saved < max_saved_alerts:
+                alert = Alert(
+                    timestamp=datetime.utcnow(),
+                    prediction=prediction,
+                    confidence=confidence,
+                    anomaly=int(anomaly),
+                    risk=risk,
+                    source_ip="CSV",
+                    destination_ip="CSV",
+                    details="Batch CSV prediction",
+                )
+                db.add(alert)
+                alerts_saved += 1
+
+    if alerts_saved:
+        db.commit()
+
+    return {
+        "total": total_rows,
+        "suspicious": suspicious,
+        "alerts_saved": alerts_saved,
+        "rows_returned": len(rows),
+        "rows": rows,
+    }
+
+
+# ---------------------------------------------------------
+# RECENT SECURITY ALERTS
+# ---------------------------------------------------------
 @app.get("/api/alerts")
 def alerts(
     limit: int = 50,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     safe_limit = max(1, min(limit, 200))
 
@@ -247,15 +344,15 @@ def alerts(
             "risk": a.risk,
             "source_ip": a.source_ip,
             "destination_ip": a.destination_ip,
-            "details": a.details
+            "details": a.details,
         }
         for a in items
     ]
 
 
-# --------------------------------------------------
-# Dashboard statistics
-# --------------------------------------------------
+# ---------------------------------------------------------
+# ALERT STATISTICS
+# ---------------------------------------------------------
 @app.get("/api/stats")
 def stats(db: Session = Depends(get_db)):
     items = db.query(Alert).all()
@@ -264,7 +361,9 @@ def stats(db: Session = Depends(get_db)):
     by_attack = {}
 
     for alert in items:
-        by_risk[alert.risk] = by_risk.get(alert.risk, 0) + 1
+        by_risk[alert.risk] = (
+            by_risk.get(alert.risk, 0) + 1
+        )
         by_attack[alert.prediction] = (
             by_attack.get(alert.prediction, 0) + 1
         )
@@ -274,5 +373,5 @@ def stats(db: Session = Depends(get_db)):
         "critical": by_risk.get("CRITICAL", 0),
         "high": by_risk.get("HIGH", 0),
         "medium": by_risk.get("MEDIUM", 0),
-        "attack_types": by_attack
+        "attack_types": by_attack,
     }
