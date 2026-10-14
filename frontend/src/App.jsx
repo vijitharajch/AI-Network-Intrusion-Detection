@@ -4,7 +4,6 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   getStats,
   getAlerts,
-  getLiveFlows,
   predictCSV
 } from './services/api';
 
@@ -20,12 +19,11 @@ function Stat({ label, value, kind = '' }) {
 function App() {
   const [stats, setStats] = useState({});
   const [alerts, setAlerts] = useState([]);
-  const [liveData, setLiveData] = useState(null);
   const [file, setFile] = useState(null);
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [liveError, setLiveError] = useState('');
+  const [refreshError, setRefreshError] = useState('');
 
   const loadingRef = useRef(false);
   const refreshingRef = useRef(false);
@@ -36,20 +34,17 @@ function App() {
     refreshingRef.current = true;
 
     try {
-      const [nextStats, nextAlerts, nextLiveData] =
-        await Promise.all([
-          getStats(),
-          getAlerts(),
-          getLiveFlows()
-        ]);
+      const [nextStats, nextAlerts] = await Promise.all([
+        getStats(),
+        getAlerts()
+      ]);
 
       setStats(nextStats);
       setAlerts(Array.isArray(nextAlerts) ? nextAlerts : []);
-      setLiveData(nextLiveData);
-      setLiveError('');
+      setRefreshError('');
     } catch (e) {
       console.error('Dashboard refresh failed:', e);
-      setLiveError(
+      setRefreshError(
         'Could not refresh dashboard data. Check the backend connection.'
       );
     } finally {
@@ -77,6 +72,8 @@ function App() {
       const data = await predictCSV(file);
 
       setResult(data);
+
+      // Refresh alert statistics after CSV analysis.
       await load();
     } catch (e) {
       setError(
@@ -88,9 +85,6 @@ function App() {
       setLoading(false);
     }
   };
-
-  const flows = liveData?.flows ?? [];
-  const isSimulated = liveData?.mode === 'SIMULATED DEMO';
 
   return (
     <div className="app">
@@ -115,17 +109,23 @@ function App() {
       <main>
         {/* Security alert counters */}
         <section className="stats">
-          <Stat label="Total Alerts" value={stats.alerts} />
+          <Stat
+            label="Total Alerts"
+            value={stats.alerts}
+          />
+
           <Stat
             label="Critical"
             value={stats.critical}
             kind="critical"
           />
+
           <Stat
             label="High Risk"
             value={stats.high}
             kind="high"
           />
+
           <Stat
             label="Medium Risk"
             value={stats.medium}
@@ -153,16 +153,24 @@ function App() {
               }}
             />
 
-            <button onClick={upload} disabled={!file || loading}>
+            <button
+              onClick={upload}
+              disabled={!file || loading}
+            >
               {loading ? 'Analyzing...' : 'Run Detection'}
             </button>
 
             {loading && (
-              <p>Processing the CSV. Large files may take time.</p>
+              <p>
+                Processing the CSV. Large files may take time.
+              </p>
             )}
 
             {error && (
-              <p role="alert" style={{ color: '#ff6b6b' }}>
+              <p
+                role="alert"
+                style={{ color: '#ff6b6b' }}
+              >
                 {error}
               </p>
             )}
@@ -212,132 +220,28 @@ function App() {
           </div>
         </section>
 
-        {/* Live network traffic */}
-        <section className="panel">
-          <div className="panelhead">
-            <h2>Live Network Traffic</h2>
-
-            <span
-              className={`badge ${
-                isSimulated ? 'medium' : 'tcp'
-              }`}
-            >
-              {liveData?.mode || 'CONNECTING'}
-            </span>
-
-            <button className="ghost" onClick={load}>
-              Refresh
-            </button>
-          </div>
-
-          <p className="muted">
-            {isSimulated
-              ? 'Presentation simulation: generated sample TCP/UDP flows. These are not real captured packets or AI classifications.'
-              : 'Network-flow statistics from the available flow CSV. These values are not AI attack classifications.'}
+        {/* Backend refresh errors */}
+        {refreshError && (
+          <p
+            role="alert"
+            style={{ color: '#ff6b6b' }}
+          >
+            {refreshError}
           </p>
+        )}
 
-          {liveError && (
-            <p role="alert" style={{ color: '#ff6b6b' }}>
-              {liveError}
-            </p>
-          )}
-
-          {liveData?.message && (
-            <p className="muted">{liveData.message}</p>
-          )}
-
-          <section className="stats">
-            <Stat label="Total Flows" value={liveData?.total} />
-            <Stat label="TCP Flows" value={liveData?.tcp} />
-            <Stat label="UDP Flows" value={liveData?.udp} />
-            <Stat
-              label="Total Packets"
-              value={liveData?.total_packets?.toLocaleString()}
-            />
-          </section>
-
-          <p>
-            Total bytes:{' '}
-            <strong>
-              {liveData?.total_bytes?.toLocaleString() ?? 0}
-            </strong>
-          </p>
-
-          <div className="tablewrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Source</th>
-                  <th>Destination</th>
-                  <th>Protocol</th>
-                  <th>Packets</th>
-                  <th>Bytes</th>
-                  <th>Duration (s)</th>
-                </tr>
-              </thead>
-
-              <tbody>
-                {flows.length === 0 ? (
-                  <tr>
-                    <td colSpan="6" className="empty">
-                      No flow data available. Check the backend
-                      or reload the dashboard.
-                    </td>
-                  </tr>
-                ) : (
-                  flows.map((flow, index) => (
-                    <tr
-                      key={`${flow.src_ip}-${flow.src_port}-${flow.dst_ip}-${flow.dst_port}-${index}`}
-                    >
-                      <td>
-                        {flow.src_ip}:{flow.src_port}
-                      </td>
-
-                      <td>
-                        {flow.dst_ip}:{flow.dst_port}
-                      </td>
-
-                      <td>
-                        <span
-                          className={`badge ${
-                            (flow.protocol || '').toLowerCase()
-                          }`}
-                        >
-                          {flow.protocol}
-                        </span>
-                      </td>
-
-                      <td>
-                        {Number(flow.packets ?? 0).toLocaleString()}
-                      </td>
-
-                      <td>
-                        {Number(flow.bytes ?? 0).toLocaleString()}
-                      </td>
-
-                      <td>{flow.duration_seconds}</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        {/* Genuine model-generated security alerts */}
+        {/* Recent security alerts */}
         <section className="panel">
           <div className="panelhead">
             <h2>Recent Security Alerts</h2>
 
-            <button className="ghost" onClick={load}>
+            <button
+              className="ghost"
+              onClick={load}
+            >
               Refresh
             </button>
           </div>
-
-          <p className="muted">
-            Alerts recorded by the backend prediction workflow.
-            Simulated traffic is not inserted into this alert list.
-          </p>
 
           <div className="tablewrap">
             <table>
@@ -356,7 +260,10 @@ function App() {
               <tbody>
                 {alerts.length === 0 ? (
                   <tr>
-                    <td colSpan="7" className="empty">
+                    <td
+                      colSpan="7"
+                      className="empty"
+                    >
                       No alerts recorded.
                     </td>
                   </tr>
@@ -364,7 +271,9 @@ function App() {
                   alerts.map((a) => (
                     <tr key={a.id}>
                       <td>
-                        {new Date(a.timestamp).toLocaleString()}
+                        {new Date(
+                          a.timestamp
+                        ).toLocaleString()}
                       </td>
 
                       <td>{a.prediction}</td>
@@ -373,7 +282,9 @@ function App() {
                         {(Number(a.confidence) * 100).toFixed(1)}%
                       </td>
 
-                      <td>{a.anomaly ? 'YES' : 'NO'}</td>
+                      <td>
+                        {a.anomaly ? 'YES' : 'NO'}
+                      </td>
 
                       <td>
                         <span
@@ -386,6 +297,7 @@ function App() {
                       </td>
 
                       <td>{a.source_ip}</td>
+
                       <td>{a.destination_ip}</td>
                     </tr>
                   ))
